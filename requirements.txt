@@ -1,0 +1,6 @@
+numpy
+pandas
+elasticsearch
+scikit-learn
+xgboost
+sentence-transformers
