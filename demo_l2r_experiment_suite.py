@@ -6,12 +6,18 @@ K sweep, and rank objective aligned with eval metric (MRR → rank:pairwise, NDC
 
 Stages (01→09): baseline → +log/norm BM25 → +IDF overlap & TF → +proximity → +coverage tiers
 → +dense (cos, L2, dot) → +cos² & BM25×cos → +per-query max-norm (BM25/cos/log)
-→ +explicit interactions (BM25×cov, BM25×overlap, cos×cov). Then 10: negative sampling.
+→ +explicit interactions. All stages include rank_bm25 & rank_cos (within-query rank, 1=best).
+Then 10: extra pool negatives; 11: curated train (pos + top-5 cos negs + top-5 bm25 negs + 5 random);
+12: same as 11 then +5 random pool negs/query.
 
 Builds one BM25 pool (max-k per query), encodes queries + loads passage vectors once, then sweeps
 K_eval and feature stacks so embedding cost is not repeated per experiment.
 
 Writes progress to a log file with flush after each line — use: tail -f your_log.txt
+
+Evaluation: BM25 / cosine / L2R MRR@k are averaged over every test query in the split. If a query has
+no qrel document in its top-K BM25 pool, its MRR contribution is 0 (honest retrieval). The logged
+`cos` value is mean MRR for cosine reranking, not raw similarity; cosine rerank uses frozen emb_cos_raw.
 
 Usage:
   python demo_l2r_experiment_suite.py
@@ -83,6 +89,20 @@ def eval_metric(rels: List[int], metric: str, k: int) -> float:
     if metric == "mrr":
         return mrr_at_k(rels, k=k)
     raise ValueError(metric)
+
+
+def format_eval_result_line(met: Dict[str, object]) -> str:
+    """Human-readable one-line summary for logs."""
+    line = (
+        f"  → BM25={met['bm25']:.4f} | L2R={met['l2r']:.4f} (Δ {met['l2r_minus_bm25']:+.4f})"
+        + (f" | cos={met['cosine']:.4f}" if "cosine" in met else "")
+    )
+    if "n_test_queries" in met:
+        line += (
+            f" | rel-in-topK {int(met['n_test_with_rel_in_pool'])}/{int(met['n_test_queries'])}"
+            f" ({100.0 * float(met['frac_test_rel_in_pool']):.1f}%)"
+        )
+    return line
 
 
 def _l2_normalize_rows(x: np.ndarray) -> np.ndarray:
@@ -296,6 +316,8 @@ class FeatureSpec:
     dense: bool = False
     dense_extras: bool = False  # cos^2, bm25*cos (needs dense)
     interactions: bool = False
+    # Within-query ranks (1 = best) by BM25 and by emb_cos; recomputed on train after curated/neg.
+    ranks: bool = False
 
 
 def build_feature_matrix(
@@ -310,6 +332,7 @@ def build_feature_matrix(
     cols: List[str] = []
 
     base = ["overlap", "coverage", "doc_len", "phrase"]
+    
     if spec.bm25_variants:
         base = ["bm25_raw", "bm25_log", "bm25_norm_q"] + base
     else:
@@ -338,6 +361,9 @@ def build_feature_matrix(
 
     if spec.interactions:
         ordered += ["bm25_x_cov", "bm25_x_overlap", "cos_x_cov"]
+
+    if spec.ranks:
+        ordered += ["rank_bm25", "rank_cos"]
 
     # Precompute per-query max bm25 for norm
     gbm25 = df.groupby("qid")[bm25_col].transform("max").replace(0, np.nan)
@@ -430,6 +456,10 @@ def build_feature_matrix(
             vec["bm25_x_cov"] = bm * cov
             vec["bm25_x_overlap"] = bm * float(overlap)
             vec["cos_x_cov"] = emb_cos * cov
+
+        if spec.ranks:
+            vec["rank_bm25"] = float(r.get("rank_bm25", 1.0))
+            vec["rank_cos"] = float(r.get("rank_cos", 1.0))
 
         rows.append([vec[c] for c in ordered])
 
@@ -534,6 +564,42 @@ def add_negatives_lowbm_highcos(
     return pd.concat([df, ex], ignore_index=True)
 
 
+def apply_curated_train_mix(
+    train_df: pd.DataFrame,
+    rng: random.Random,
+    n_hard: int = 5,
+    n_lex: int = 5,
+    n_rand: int = 5,
+) -> pd.DataFrame:
+    """
+    Per query: keep all positives, plus up to n_hard highest emb_cos negatives,
+    n_lex highest bm25 negatives, and n_rand random negatives (dedup by pid).
+    """
+    if train_df.empty:
+        return train_df
+    if "emb_cos" not in train_df.columns:
+        raise ValueError("curated train mix requires emb_cos on train_df")
+
+    chunks: List[pd.DataFrame] = []
+    for _qid, group in train_df.groupby("qid", sort=False):
+        pos = group[group["label"] == 1]
+        neg = group[group["label"] == 0]
+        if neg.empty:
+            chunks.append(pos if len(pos) > 0 else group)
+            continue
+        hard = neg.sort_values("emb_cos", ascending=False).head(n_hard)
+        lex = neg.sort_values("bm25", ascending=False).head(n_lex)
+        k = min(n_rand, len(neg))
+        if k > 0:
+            rand = neg.sample(n=k, random_state=rng.randint(0, 2**31 - 1))
+        else:
+            rand = neg.iloc[0:0]
+        merged = pd.concat([pos, hard, lex, rand], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["pid"], keep="first")
+        chunks.append(merged)
+    return pd.concat(chunks, ignore_index=True)
+
+
 # ---------------------------------------------------------------------------
 # One experiment run
 # ---------------------------------------------------------------------------
@@ -553,6 +619,10 @@ class RunConfig:
     neg_random: int = 0
     neg_hard: int = 0
     per_query_norm_bm25_cos: bool = False
+    curated_train: bool = False
+    curated_n_hard: int = 5
+    curated_n_lex: int = 5
+    curated_n_rand: int = 5
 
 
 def run_single_experiment(
@@ -575,10 +645,18 @@ def run_single_experiment(
     # keep top-K per query by bm25
     df = df.groupby("qid", group_keys=False).head(K)
 
+    # Rerank by true cosine, never by StandardScaler'd or per-query-normalized emb_cos.
+    if "emb_cos" in df.columns:
+        df["emb_cos_raw"] = df["emb_cos"].to_numpy(dtype=np.float64, copy=True)
+
     feat_spec = run.feature_spec
     if feat_spec.dense or feat_spec.dense_extras or feat_spec.interactions:
         if "emb_cos" not in df.columns:
             raise RuntimeError("Dense features requested but emb_cos missing on df")
+
+    if feat_spec.ranks:
+        df["rank_bm25"] = df.groupby("qid")["bm25"].rank(ascending=False, method="min")
+        df["rank_cos"] = df.groupby("qid")["emb_cos"].rank(ascending=False, method="min")
 
     feat_mat, feat_cols = build_feature_matrix(df, qid_to_tokens, idf_map, feat_spec)
     df = df.drop(columns=[c for c in feat_cols if c in df.columns], errors="ignore")
@@ -586,13 +664,55 @@ def run_single_experiment(
 
     train_df = df[df["_split"] == "train"].copy()
     test_df = df[df["_split"] == "test"].copy()
+    # ================================
+    # DEBUG: rel-in-topK stats
+    # ================================
+    per_query_stats = []
+
+    for qid, g in test_df.groupby("qid"):
+        has_rel = int(g["label"].sum() > 0)
+        num_rel = int(g["label"].sum())
+        per_query_stats.append((qid, has_rel, num_rel))
+
+    total_q = len(per_query_stats)
+    with_rel = sum(x[1] for x in per_query_stats)
+    without_rel = total_q - with_rel
+
+    print("\n=== REL-IN-TOPK DEBUG ===")
+    print(f"Total test queries       : {total_q}")
+    print(f"With ≥1 relevant doc     : {with_rel}")
+    print(f"With 0 relevant docs     : {without_rel}")
+    print(f"Fraction with relevant   : {with_rel / total_q:.4f}")
+    print("=========================\n")
+
+    if run.curated_train:
+        train_df = apply_curated_train_mix(
+            train_df,
+            rng,
+            n_hard=run.curated_n_hard,
+            n_lex=run.curated_n_lex,
+            n_rand=run.curated_n_rand,
+        )
+        _gs = train_df.groupby("qid").size()
+        _ok = _gs[_gs >= 2].index
+        train_df = train_df[train_df["qid"].isin(_ok)]
 
     if run.neg_random > 0:
         train_df = add_negatives_random(train_df, rel_pairs, rng, run.neg_random)
     if run.neg_hard > 0:
         train_df = add_negatives_lowbm_highcos(train_df, rng, run.neg_hard)
 
-    if run.neg_random > 0 or run.neg_hard > 0:
+    need_train_refeat = (run.neg_random > 0 or run.neg_hard > 0) or (
+        run.curated_train and feat_spec.ranks
+    )
+    if need_train_refeat:
+        if feat_spec.ranks:
+            train_df["rank_bm25"] = train_df.groupby("qid")["bm25"].rank(
+                ascending=False, method="min"
+            )
+            train_df["rank_cos"] = train_df.groupby("qid")["emb_cos"].rank(
+                ascending=False, method="min"
+            )
         tr_part, tr_cols = build_feature_matrix(train_df, qid_to_tokens, idf_map, feat_spec)
         train_df = train_df.drop(columns=[c for c in tr_cols if c in train_df.columns], errors="ignore")
         train_df = pd.concat([train_df.reset_index(drop=True), tr_part.reset_index(drop=True)], axis=1)
@@ -616,11 +736,16 @@ def run_single_experiment(
         log(f"  SKIP {run.name}: empty train/test")
         return {}
 
+    # Pairwise ranker needs ≥1 positive per train query. Do NOT drop test queries that have
+    # zero relevants in the top-K pool — including them gives honest MRR (0 for that query).
+    n_test_q = int(test_df["qid"].nunique())
+    n_test_with_rel = int(
+        sum(1 for _, g in test_df.groupby("qid") if int(g["label"].sum()) > 0)
+    )
     if metric == "mrr":
         train_df = train_df[train_df.groupby("qid")["label"].transform("sum") > 0]
-        test_df = test_df[test_df.groupby("qid")["label"].transform("sum") > 0]
-        if train_df.empty or test_df.empty:
-            log(f"  SKIP {run.name}: no positives per query for MRR filter")
+        if train_df.empty:
+            log(f"  SKIP {run.name}: no train queries with a positive in top-{K}")
             return {}
 
     scaler = StandardScaler()
@@ -644,12 +769,13 @@ def run_single_experiment(
     bm25_scores = []
     cos_scores = []
     l2r_scores = []
+    cos_col = "emb_cos_raw" if "emb_cos_raw" in test_df.columns else "emb_cos"
     for _, g in test_df.groupby("qid"):
         gg = g.sort_values("bm25", ascending=False).head(K)
         rel_b = gg["label"].head(cutoff).tolist()
         bm25_scores.append(eval_metric(rel_b, metric, cutoff))
-        if "emb_cos" in g.columns:
-            gc = g.sort_values("emb_cos", ascending=False).head(K)
+        if cos_col in g.columns:
+            gc = g.sort_values(cos_col, ascending=False).head(K)
             cos_scores.append(eval_metric(gc["label"].head(cutoff).tolist(), metric, cutoff))
         Xq = gg[feat_cols].to_numpy(np.float32)
         pred = model.predict(Xq)
@@ -660,6 +786,9 @@ def run_single_experiment(
         "bm25": float(np.mean(bm25_scores)),
         "l2r": float(np.mean(l2r_scores)),
         "l2r_minus_bm25": float(np.mean(l2r_scores) - np.mean(bm25_scores)),
+        "n_test_queries": n_test_q,
+        "n_test_with_rel_in_pool": n_test_with_rel,
+        "frac_test_rel_in_pool": float(n_test_with_rel / max(1, n_test_q)),
     }
     if cos_scores:
         out["cosine"] = float(np.mean(cos_scores))
@@ -735,7 +864,7 @@ def main() -> None:
     max_k = args.max_k
     if args.quick:
         target_q = min(800, target_q)
-        max_k = min(100, max_k)
+        max_k = min(500, max_k)
 
     log(f"Building candidate pool: target_q={target_q}, max_k={max_k}")
 
@@ -833,16 +962,27 @@ def main() -> None:
         "colsample_bytree": 0.9,
     }
 
+    _full = dict(
+        bm25_variants=True,
+        idf_tf=True,
+        proximity=True,
+        coverage_tiers=True,
+        dense=True,
+        dense_extras=True,
+        interactions=True,
+        ranks=True,
+    )
+
     specs: List[Tuple[str, FeatureSpec]] = [
-        ("01_baseline", FeatureSpec("baseline")),
-        ("02_bm25_variants", FeatureSpec("b", bm25_variants=True)),
-        ("03_plus_idf_tf", FeatureSpec("c", bm25_variants=True, idf_tf=True)),
-        ("04_plus_proximity", FeatureSpec("d", bm25_variants=True, idf_tf=True, proximity=True)),
-        ("05_plus_coverage_tiers", FeatureSpec("e", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True)),
-        ("06_plus_dense", FeatureSpec("f", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True)),
-        ("07_plus_dense_extras", FeatureSpec("g", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True, dense_extras=True)),
-        ("08_plus_query_norm_flags", FeatureSpec("h", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True, dense_extras=True)),
-        ("09_plus_interactions", FeatureSpec("i", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True, dense_extras=True, interactions=True)),
+        ("01_baseline", FeatureSpec("baseline", ranks=True)),
+        ("02_bm25_variants", FeatureSpec("b", bm25_variants=True, ranks=True)),
+        ("03_plus_idf_tf", FeatureSpec("c", bm25_variants=True, idf_tf=True, ranks=True)),
+        ("04_plus_proximity", FeatureSpec("d", bm25_variants=True, idf_tf=True, proximity=True, ranks=True)),
+        ("05_plus_coverage_tiers", FeatureSpec("e", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, ranks=True)),
+        ("06_plus_dense", FeatureSpec("f", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True, ranks=True)),
+        ("07_plus_dense_extras", FeatureSpec("g", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True, dense_extras=True, ranks=True)),
+        ("08_plus_query_norm_flags", FeatureSpec("h", bm25_variants=True, idf_tf=True, proximity=True, coverage_tiers=True, dense=True, dense_extras=True, ranks=True)),
+        ("09_plus_interactions", FeatureSpec("i", **_full)),
     ]
 
     results_rows: List[Dict] = []
@@ -878,10 +1018,7 @@ def main() -> None:
                 continue
             if not met:
                 continue
-            log(
-                f"  → BM25={met['bm25']:.4f} | L2R={met['l2r']:.4f} (Δ {met['l2r_minus_bm25']:+.4f})"
-                + (f" | cos={met['cosine']:.4f}" if "cosine" in met else "")
-            )
+            log(format_eval_result_line(met))
             results_rows.append({"k": k_eval, "spec": spec_name, **met})
 
         # Neg sampling + full feature stack (09)
@@ -889,16 +1026,7 @@ def main() -> None:
             run = RunConfig(
                 name=f"10_{neg_label}_k{k_eval}",
                 k_eval=k_eval,
-                feature_spec=FeatureSpec(
-                    "i2",
-                    bm25_variants=True,
-                    idf_tf=True,
-                    proximity=True,
-                    coverage_tiers=True,
-                    dense=True,
-                    dense_extras=True,
-                    interactions=True,
-                ),
+                feature_spec=FeatureSpec("i2", **_full),
                 eval_metric=args.eval_metric,
                 eval_cutoff=args.eval_cutoff,
                 neg_random=n_rand,
@@ -922,10 +1050,76 @@ def main() -> None:
                 continue
             if not met:
                 continue
-            log(
-                f"  → BM25={met['bm25']:.4f} | L2R={met['l2r']:.4f} (Δ {met['l2r_minus_bm25']:+.4f})"
-            )
+            log(format_eval_result_line(met))
             results_rows.append({"k": k_eval, "spec": run.name, **met})
+
+        # 11: curated training — pos + top-5 cos negs + top-5 bm25 negs + 5 random negs (dedup)
+        run_cur = RunConfig(
+            name=f"11_curated_train_mix_k{k_eval}",
+            k_eval=k_eval,
+            feature_spec=FeatureSpec("cur", **_full),
+            eval_metric=args.eval_metric,
+            eval_cutoff=args.eval_cutoff,
+            neg_random=0,
+            neg_hard=0,
+            per_query_norm_bm25_cos=True,
+            curated_train=True,
+            curated_n_hard=5,
+            curated_n_lex=5,
+            curated_n_rand=5,
+        )
+        log(f"-- Run: {run_cur.name} | curated pos+hard+lex+rand negs | ranks in features")
+        try:
+            met = run_single_experiment(
+                run_cur,
+                df_base,
+                qid_to_tokens,
+                rel_pairs,
+                idf_map,
+                seed,
+                xgb_params,
+                log,
+            )
+        except Exception as e:
+            log(f"  ERROR {run_cur.name}: {e}")
+            met = {}
+        if met:
+            log(format_eval_result_line(met))
+            results_rows.append({"k": k_eval, "spec": "11_curated_train_mix", **met})
+
+        # 12: curated train + extra random pool negatives (like 10 but after curated)
+        run_cur2 = RunConfig(
+            name=f"12_curated_plus_rand5_k{k_eval}",
+            k_eval=k_eval,
+            feature_spec=FeatureSpec("cur2", **_full),
+            eval_metric=args.eval_metric,
+            eval_cutoff=args.eval_cutoff,
+            neg_random=5,
+            neg_hard=0,
+            per_query_norm_bm25_cos=True,
+            curated_train=True,
+            curated_n_hard=5,
+            curated_n_lex=5,
+            curated_n_rand=5,
+        )
+        log(f"-- Run: {run_cur2.name} | curated mix then +5 random negs/query from pool")
+        try:
+            met = run_single_experiment(
+                run_cur2,
+                df_base,
+                qid_to_tokens,
+                rel_pairs,
+                idf_map,
+                seed,
+                xgb_params,
+                log,
+            )
+        except Exception as e:
+            log(f"  ERROR {run_cur2.name}: {e}")
+            met = {}
+        if met:
+            log(format_eval_result_line(met))
+            results_rows.append({"k": k_eval, "spec": "12_curated_plus_rand5", **met})
 
     res_df = pd.DataFrame(results_rows)
     log("")

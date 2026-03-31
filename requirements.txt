@@ -1,6 +1,9 @@
 numpy
 pandas
+matplotlib
 elasticsearch
 scikit-learn
 xgboost
 sentence-transformers
+fastapi
+uvicorn

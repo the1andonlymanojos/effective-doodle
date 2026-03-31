@@ -1,0 +1,28 @@
+=== BM25 vs qrels (debug) ===
+run_dir: runs/bm25_rank_debug/20260328_212339
+queries file: queries.train.tsv | qrels: qrels.train.tsv
+sampled unique queries: 10000
+queries with >=1 qrel in train qrels: 10000
+relevant doc appeared somewhere in top-1000: 8085 (80.85%)
+no relevant pid in top-1000: 1915 (19.15%)
+
+best_rank among FOUND (n=8085):
+  mean: 104.52
+  median: 19.00
+  p90: 347.60
+  p95: 562.00
+  p99: 879.16
+
+MRR (relevant in top-1000, else 0): 0.167248
+
+Hit rate (at least one relevant in top-k) over 10000 qrels-queries:
+  @   1:   8.84%  (884/10000)
+  @   3:  18.86%  (1886/10000)
+  @   5:  24.76%  (2476/10000)
+  @  10:  33.05%  (3305/10000)
+  @  20:  41.50%  (4150/10000)
+  @  50:  52.72%  (5272/10000)
+  @ 100:  60.40%  (6040/10000)
+  @ 200:  67.51%  (6751/10000)
+  @ 500:  75.93%  (7593/10000)
+  @1000:  80.85%  (8085/10000)

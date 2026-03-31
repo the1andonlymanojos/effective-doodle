@@ -1,0 +1,80 @@
+2026-03-28T20:30:20 | Starting experiment suite → /home/storms-end/effective-doodle/runs/my_run.txt
+2026-03-28T20:30:20 | args: Namespace(out='runs/my_run.txt', queries=500, max_k=100, seed=42, eval_metric='mrr', eval_cutoff=10, filter_qrel=False, embedding_model='sentence-transformers/all-MiniLM-L6-v2', embedding_batch=64, quick=False)
+2026-03-28T20:30:21 | Building candidate pool: target_q=500, max_k=100
+2026-03-28T20:30:24 | IDF vocab size: 156212
+2026-03-28T20:30:24 | Computing dense embeddings (queries + ES vectors)...
+2026-03-28T20:30:39 | Train queries: 400 | Test queries: 100 | K list: [100, 500]
+2026-03-28T20:30:39 | 
+2026-03-28T20:30:39 | ========== K_eval = 100 (pool built with max_k=100) ==========
+2026-03-28T20:30:39 | -- Run: 01_baseline_k100 | objective=rank:pairwise
+2026-03-28T20:30:41 |   → BM25=0.2895 | L2R=0.2188 (Δ -0.0707) | cos=0.4366
+2026-03-28T20:30:41 | -- Run: 02_bm25_variants_k100 | objective=rank:pairwise
+2026-03-28T20:30:43 |   → BM25=0.2895 | L2R=0.2736 (Δ -0.0159) | cos=0.4366
+2026-03-28T20:30:43 | -- Run: 03_plus_idf_tf_k100 | objective=rank:pairwise
+2026-03-28T20:30:45 |   → BM25=0.2895 | L2R=0.2657 (Δ -0.0238) | cos=0.4366
+2026-03-28T20:30:45 | -- Run: 04_plus_proximity_k100 | objective=rank:pairwise
+2026-03-28T20:30:47 |   → BM25=0.2895 | L2R=0.2469 (Δ -0.0425) | cos=0.4366
+2026-03-28T20:30:47 | -- Run: 05_plus_coverage_tiers_k100 | objective=rank:pairwise
+2026-03-28T20:30:49 |   → BM25=0.2895 | L2R=0.2630 (Δ -0.0265) | cos=0.4366
+2026-03-28T20:30:49 | -- Run: 06_plus_dense_k100 | objective=rank:pairwise
+2026-03-28T20:30:51 |   → BM25=0.2895 | L2R=0.3959 (Δ +0.1064) | cos=0.4366
+2026-03-28T20:30:51 | -- Run: 07_plus_dense_extras_k100 | objective=rank:pairwise
+2026-03-28T20:30:54 |   → BM25=0.2895 | L2R=0.3711 (Δ +0.0816) | cos=0.4366
+2026-03-28T20:30:54 | -- Run: 08_plus_query_norm_flags_k100 | objective=rank:pairwise
+2026-03-28T20:30:56 |   → BM25=0.2895 | L2R=0.4162 (Δ +0.1267) | cos=0.4366
+2026-03-28T20:30:56 | -- Run: 09_plus_interactions_k100 | objective=rank:pairwise
+2026-03-28T20:30:58 |   → BM25=0.2895 | L2R=0.3803 (Δ +0.0908) | cos=0.4366
+2026-03-28T20:30:58 | -- Run: 10_neg_rand5_k100 (neg_random=5, neg_hard=0)
+2026-03-28T20:31:04 |   → BM25=0.2895 | L2R=0.4029 (Δ +0.1134)
+2026-03-28T20:31:04 | -- Run: 10_neg_hard3_k100 (neg_random=0, neg_hard=3)
+2026-03-28T20:31:09 |   → BM25=0.2895 | L2R=0.3903 (Δ +0.1008)
+2026-03-28T20:31:09 | 
+2026-03-28T20:31:09 | ========== K_eval = 500 (pool built with max_k=100) ==========
+2026-03-28T20:31:09 | -- Run: 01_baseline_k500 | objective=rank:pairwise
+2026-03-28T20:31:11 |   → BM25=0.2895 | L2R=0.2188 (Δ -0.0707) | cos=0.4366
+2026-03-28T20:31:11 | -- Run: 02_bm25_variants_k500 | objective=rank:pairwise
+2026-03-28T20:31:13 |   → BM25=0.2895 | L2R=0.2736 (Δ -0.0159) | cos=0.4366
+2026-03-28T20:31:13 | -- Run: 03_plus_idf_tf_k500 | objective=rank:pairwise
+2026-03-28T20:31:15 |   → BM25=0.2895 | L2R=0.2657 (Δ -0.0238) | cos=0.4366
+2026-03-28T20:31:15 | -- Run: 04_plus_proximity_k500 | objective=rank:pairwise
+2026-03-28T20:31:17 |   → BM25=0.2895 | L2R=0.2469 (Δ -0.0425) | cos=0.4366
+2026-03-28T20:31:17 | -- Run: 05_plus_coverage_tiers_k500 | objective=rank:pairwise
+2026-03-28T20:31:19 |   → BM25=0.2895 | L2R=0.2630 (Δ -0.0265) | cos=0.4366
+2026-03-28T20:31:19 | -- Run: 06_plus_dense_k500 | objective=rank:pairwise
+2026-03-28T20:31:21 |   → BM25=0.2895 | L2R=0.3959 (Δ +0.1064) | cos=0.4366
+2026-03-28T20:31:21 | -- Run: 07_plus_dense_extras_k500 | objective=rank:pairwise
+2026-03-28T20:31:23 |   → BM25=0.2895 | L2R=0.3711 (Δ +0.0816) | cos=0.4366
+2026-03-28T20:31:23 | -- Run: 08_plus_query_norm_flags_k500 | objective=rank:pairwise
+2026-03-28T20:31:25 |   → BM25=0.2895 | L2R=0.4162 (Δ +0.1267) | cos=0.4366
+2026-03-28T20:31:25 | -- Run: 09_plus_interactions_k500 | objective=rank:pairwise
+2026-03-28T20:31:28 |   → BM25=0.2895 | L2R=0.3803 (Δ +0.0908) | cos=0.4366
+2026-03-28T20:31:28 | -- Run: 10_neg_rand5_k500 (neg_random=5, neg_hard=0)
+2026-03-28T20:31:34 |   → BM25=0.2895 | L2R=0.4029 (Δ +0.1134)
+2026-03-28T20:31:34 | -- Run: 10_neg_hard3_k500 (neg_random=0, neg_hard=3)
+2026-03-28T20:31:38 |   → BM25=0.2895 | L2R=0.3903 (Δ +0.1008)
+2026-03-28T20:31:38 | 
+2026-03-28T20:31:38 | ================ FINAL TABLE ================
+2026-03-28T20:31:38 |   k                     spec     bm25      l2r  l2r_minus_bm25  cosine
+100              01_baseline 0.289497 0.218787       -0.070709 0.43662
+100         02_bm25_variants 0.289497 0.273562       -0.015935 0.43662
+100           03_plus_idf_tf 0.289497 0.265712       -0.023785 0.43662
+100        04_plus_proximity 0.289497 0.246949       -0.042547 0.43662
+100   05_plus_coverage_tiers 0.289497 0.263021       -0.026476 0.43662
+100            06_plus_dense 0.289497 0.395871        0.106374 0.43662
+100     07_plus_dense_extras 0.289497 0.371081        0.081585 0.43662
+100 08_plus_query_norm_flags 0.289497 0.416183        0.126687 0.43662
+100     09_plus_interactions 0.289497 0.380283        0.090786 0.43662
+100        10_neg_hard3_k100 0.289497 0.390265        0.100769 0.43662
+100        10_neg_rand5_k100 0.289497 0.402939        0.113442 0.43662
+500              01_baseline 0.289497 0.218787       -0.070709 0.43662
+500         02_bm25_variants 0.289497 0.273562       -0.015935 0.43662
+500           03_plus_idf_tf 0.289497 0.265712       -0.023785 0.43662
+500        04_plus_proximity 0.289497 0.246949       -0.042547 0.43662
+500   05_plus_coverage_tiers 0.289497 0.263021       -0.026476 0.43662
+500            06_plus_dense 0.289497 0.395871        0.106374 0.43662
+500     07_plus_dense_extras 0.289497 0.371081        0.081585 0.43662
+500 08_plus_query_norm_flags 0.289497 0.416183        0.126687 0.43662
+500     09_plus_interactions 0.289497 0.380283        0.090786 0.43662
+500        10_neg_hard3_k500 0.289497 0.390265        0.100769 0.43662
+500        10_neg_rand5_k500 0.289497 0.402939        0.113442 0.43662
+2026-03-28T20:31:38 | Done.

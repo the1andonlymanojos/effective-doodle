@@ -1,0 +1,23 @@
+2026-03-28T21:13:30 | Starting experiment suite → /home/storms-end/effective-doodle/runs/my_run.txt
+2026-03-28T21:13:30 | args: Namespace(out='runs/my_run.txt', queries=5000, max_k=100, seed=42, eval_metric='mrr', eval_cutoff=10, filter_qrel=False, embedding_model='sentence-transformers/all-MiniLM-L6-v2', embedding_batch=64, quick=False)
+2026-03-28T21:13:31 | Building candidate pool: target_q=5000, max_k=100
+2026-03-28T21:14:04 | IDF vocab size: 741698
+2026-03-28T21:14:04 | Computing dense embeddings (queries + ES vectors)...
+2026-03-28T21:15:30 | Train queries: 4000 | Test queries: 1000 | K list: [100, 500]
+2026-03-28T21:15:30 | 
+2026-03-28T21:15:30 | ========== K_eval = 100 (pool built with max_k=100) ==========
+2026-03-28T21:15:30 | -- Run: 01_baseline_k100 | objective=rank:pairwise
+2026-03-28T21:15:52 |   → BM25=0.1000 | L2R=0.1563 (Δ +0.0563) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:15:52 | -- Run: 02_bm25_variants_k100 | objective=rank:pairwise
+2026-03-28T21:16:22 |   → BM25=0.1000 | L2R=0.1561 (Δ +0.0561) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:16:22 | -- Run: 03_plus_idf_tf_k100 | objective=rank:pairwise
+2026-03-28T21:16:47 |   → BM25=0.1000 | L2R=0.1549 (Δ +0.0548) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:16:47 | -- Run: 04_plus_proximity_k100 | objective=rank:pairwise
+2026-03-28T21:17:10 |   → BM25=0.1000 | L2R=0.1556 (Δ +0.0556) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:17:10 | -- Run: 05_plus_coverage_tiers_k100 | objective=rank:pairwise
+2026-03-28T21:17:33 |   → BM25=0.1000 | L2R=0.1546 (Δ +0.0546) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:17:33 | -- Run: 06_plus_dense_k100 | objective=rank:pairwise
+2026-03-28T21:17:56 |   → BM25=0.1000 | L2R=0.1560 (Δ +0.0559) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:17:56 | -- Run: 07_plus_dense_extras_k100 | objective=rank:pairwise
+2026-03-28T21:18:20 |   → BM25=0.1000 | L2R=0.1545 (Δ +0.0545) | cos=0.1561 | rel-in-topK 372/1000 (37.2%)
+2026-03-28T21:18:20 | -- Run: 08_plus_query_norm_flags_k100 | objective=rank:pairwise
