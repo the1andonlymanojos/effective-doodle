@@ -157,40 +157,40 @@ def add_embedding_features(
     device: str,
 ) -> np.ndarray:
     """Add embedding features. Returns (n_rows, 3) array."""
+    # Get unique queries and passages
+    uqids = df["qid"].unique().tolist()
+    upids = df["pid"].unique().tolist()
+
     print(f"Fetching passage embeddings...")
-    unique_pids = df["pid"].unique().tolist()
     pid_to_vec, missing = fetch_passage_embeddings(
-        es, index, unique_pids, emb_field, batch_size=batch_size
+        es, index, upids, emb_field, batch_size=batch_size
     )
-    print(f"  Found: {len(pid_to_vec)}, Missing: {missing}/{len(unique_pids)}")
+    print(f"  Passages: {len(pid_to_vec)} found, {missing}/{len(upids)} missing")
 
     from sentence_transformers import SentenceTransformer
 
     model = SentenceTransformer(model_name, device=device)
 
-    qids = df["qid"].tolist()
-    query_texts = [qid_to_text[q] for q in qids]
+    # Map qid/pid to indices
+    qid_to_idx = {q: i for i, q in enumerate(uqids)}
+    pid_to_idx = {p: i for i, p in enumerate(upids)}
 
-    print(f"  Encoding {len(query_texts)} queries...")
-    q_emb = model.encode(
-        query_texts,
+    # Encode UNIQUE queries only
+    q_texts = [qid_to_text[q] for q in uqids]
+    print(f"  Encoding {len(uqids)} unique queries...")
+    q_emb_unique = model.encode(
+        q_texts,
         batch_size=batch_size,
-        show_progress_bar=False,
+        show_progress_bar=True,
         convert_to_numpy=True,
         normalize_embeddings=True,
     )
 
-    pids = df["pid"].tolist()
-    dim = None
-    for v in pid_to_vec.values():
-        dim = v.shape[0]
-        break
+    dim = q_emb_unique.shape[1]
 
-    if dim is None:
-        raise RuntimeError("No valid passage embeddings")
-
-    p_emb = np.zeros((len(pids), dim), dtype=np.float64)
-    for i, pid in enumerate(pids):
+    # Build passage embedding matrix
+    p_emb = np.zeros((len(upids), dim), dtype=np.float64)
+    for i, pid in enumerate(upids):
         if pid in pid_to_vec:
             v = pid_to_vec[pid]
             if v.shape[0] == dim:
@@ -198,9 +198,16 @@ def add_embedding_features(
 
     p_emb = l2_normalize_rows(p_emb)
 
-    emb_cos = np.sum(q_emb * p_emb, axis=1)
-    emb_l2 = np.linalg.norm(q_emb - p_emb, axis=1)
-    emb_dot = np.sum(q_emb * p_emb, axis=1)
+    # Map to all rows
+    qi = np.array([qid_to_idx[q] for q in df["qid"]])
+    pi = np.array([pid_to_idx[p] for p in df["pid"]])
+
+    q_emb = q_emb_unique[qi]
+    p_emb_rows = p_emb[pi]
+
+    emb_cos = np.sum(q_emb * p_emb_rows, axis=1)
+    emb_l2 = np.linalg.norm(q_emb - p_emb_rows, axis=1)
+    emb_dot = np.sum(q_emb * p_emb_rows, axis=1)
 
     return np.column_stack([emb_cos, emb_l2, emb_dot])
 
