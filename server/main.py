@@ -5,15 +5,15 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+from dotenv import load_dotenv
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from l2r_features import (
+from l2r.features import (
     L2RConfig,
     bm25_search,
     featurize_candidates,
-    load_dotenv_like,
     load_ranker_artifacts,
     tokenize,
 )
@@ -58,7 +58,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-def _load_dev_qrels_and_queries(queries_dev_path: str, qrels_dev_path: str) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]], List[str]]:
+def _load_dev_qrels_and_queries(
+    queries_dev_path: str, qrels_dev_path: str
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, int]], List[str]]:
     queries_dev = pd.read_csv(
         queries_dev_path,
         sep="\t",
@@ -74,7 +76,9 @@ def _load_dev_qrels_and_queries(queries_dev_path: str, qrels_dev_path: str) -> T
     qrels_dev["rel"] = qrels_dev["rel"].astype(int)
     qrels_dev = qrels_dev[qrels_dev["rel"] > 0].copy()
 
-    qid_to_query = {str(q): str(t) for q, t in zip(queries_dev["qid"], queries_dev["query"])}
+    qid_to_query = {
+        str(q): str(t) for q, t in zip(queries_dev["qid"], queries_dev["query"])
+    }
     qid_to_rels: Dict[str, Dict[str, int]] = {}
     for qid, pid, rel in zip(qrels_dev["qid"], qrels_dev["pid"], qrels_dev["rel"]):
         qid = str(qid)
@@ -86,19 +90,24 @@ def _load_dev_qrels_and_queries(queries_dev_path: str, qrels_dev_path: str) -> T
 
 
 def _init_models_and_state() -> None:
-    env = load_dotenv_like(os.environ.get("DOTENV_PATH", ".env.local"))
+    dotenv_path = os.environ.get("DOTENV_PATH", ".env.local")
+    load_dotenv(dotenv_path)
 
-    es_url = env.get("ES_LOCAL_URL")
-    es_api_key = env.get("ES_LOCAL_API_KEY")
+    es_url = os.environ.get("ES_LOCAL_URL")
+    es_api_key = os.environ.get("ES_LOCAL_API_KEY")
     if not es_url or not es_api_key:
-        raise RuntimeError("Missing ES_LOCAL_URL / ES_LOCAL_API_KEY (expected in .env.local).")
+        raise RuntimeError(
+            "Missing ES_LOCAL_URL / ES_LOCAL_API_KEY (expected in .env.local)."
+        )
 
     cfg = L2RConfig(
         seed=_env_int("SEED", 42),
         es_index=os.environ.get("ES_INDEX", "msmarco"),
         es_passage_field=os.environ.get("ES_PASSAGE_FIELD", "passage"),
         use_embedding_features=_env_bool("USE_EMBEDDING_FEATURES", True),
-        embedding_model_name=os.environ.get("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"),
+        embedding_model_name=os.environ.get(
+            "EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2"
+        ),
         embedding_batch_size=_env_int("EMBEDDING_BATCH_SIZE", 128),
         es_mget_batch_size=_env_int("ES_MGET_BATCH_SIZE", 500),
         es_passage_emb_index=os.environ.get("ES_PASSAGE_EMB_INDEX") or None,
@@ -113,7 +122,7 @@ def _init_models_and_state() -> None:
         raise RuntimeError(
             f"Missing ranker artifacts under {artifact_dir!r}. "
             "Expected xgb_ranker.json, scaler.pkl, features.pkl. "
-            "Run: python3 train_l2r_artifacts.py --out-dir runs/l2r_api_artifacts"
+            "Run: python training/train_artifacts.py --out-dir runs/l2r_api_artifacts"
         )
 
     model, scaler, feat_cols, scale_cols = load_ranker_artifacts(artifact_dir)
@@ -123,18 +132,23 @@ def _init_models_and_state() -> None:
         from sentence_transformers import CrossEncoder
 
         ce_model = CrossEncoder(
-            os.environ.get("CROSS_ENCODER_MODEL_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+            os.environ.get(
+                "CROSS_ENCODER_MODEL_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            ),
             device=os.environ.get("EMBEDDING_DEVICE", "cuda"),
         )
     else:
         ce_model = None
 
+    data_dir = os.environ.get("DATA_DIR", "data")
     qid_to_query, qid_to_rels, eligible_qids = _load_dev_qrels_and_queries(
-        os.environ.get("QUERIES_DEV_PATH", "queries.dev.tsv"),
-        os.environ.get("QRELS_DEV_PATH", "qrels.dev.tsv"),
+        os.path.join(data_dir, "queries.dev.tsv"),
+        os.path.join(data_dir, "qrels.dev.tsv"),
     )
     if not eligible_qids:
-        raise RuntimeError("No eligible dev qids found (need qrels.dev rel>0 intersect queries.dev).")
+        raise RuntimeError(
+            "No eligible dev qids found (need qrels.dev rel>0 intersect queries.dev)."
+        )
 
     STATE.es = es
     STATE.cfg = cfg
@@ -156,7 +170,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="L2R + BM25 + Cross-encoder demo API", lifespan=lifespan)
-_cors_origins_raw = os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost,http://localhost:3040,http://127.0.0.1:3000")
+_cors_origins_raw = os.environ.get(
+    "CORS_ALLOW_ORIGINS", "http://localhost,http://localhost:3040,http://127.0.0.1:3000"
+)
 _cors_allow_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -211,10 +227,17 @@ def sample(
         passage_field=STATE.cfg.es_passage_field,
     )
     if not hits:
-        raise HTTPException(status_code=503, detail="BM25 returned no hits for sampled qid; try again.")
+        raise HTTPException(
+            status_code=503, detail="BM25 returned no hits for sampled qid; try again."
+        )
 
     rows = [
-        {"qid": qid, "pid": pid, STATE.cfg.es_passage_field: passage, "bm25": float(score)}
+        {
+            "qid": qid,
+            "pid": pid,
+            STATE.cfg.es_passage_field: passage,
+            "bm25": float(score),
+        }
         for pid, passage, score in hits
     ]
     df = pd.DataFrame(rows)
@@ -233,12 +256,18 @@ def sample(
     )
     STATE.st_model = st_model
 
-    df[STATE.scale_cols] = STATE.scaler.transform(df[STATE.scale_cols].to_numpy(dtype="float64"))
+    df[STATE.scale_cols] = STATE.scaler.transform(
+        df[STATE.scale_cols].to_numpy(dtype="float64")
+    )
     Xq = df[STATE.feat_cols].to_numpy("float32")
     preds = STATE.rank_model.predict(Xq)
 
     df_bm25 = df.sort_values("bm25", ascending=False).reset_index(drop=True)
-    df_l2r = df.assign(l2r_score=preds).sort_values("l2r_score", ascending=False).reset_index(drop=True)
+    df_l2r = (
+        df.assign(l2r_score=preds)
+        .sort_values("l2r_score", ascending=False)
+        .reset_index(drop=True)
+    )
 
     bm25_list = [
         {
@@ -270,7 +299,11 @@ def sample(
             show_progress_bar=False,
         )
         top["ce_score"] = ce_scores
-        final = top.sort_values("ce_score", ascending=False).head(ce_return_k).reset_index(drop=True)
+        final = (
+            top.sort_values("ce_score", ascending=False)
+            .head(ce_return_k)
+            .reset_index(drop=True)
+        )
         for i, r in final.iterrows():
             ce_final.append(
                 {
@@ -286,7 +319,9 @@ def sample(
     rels_map = STATE.qid_to_rels.get(qid, {})
     relevant_pids = sorted(rels_map.keys())
 
-    in_pool = [pid for pid in relevant_pids if pid in set(df["pid"].astype(str).tolist())]
+    in_pool = [
+        pid for pid in relevant_pids if pid in set(df["pid"].astype(str).tolist())
+    ]
 
     return {
         "qid": qid,
@@ -309,4 +344,3 @@ def sample(
         "l2r": l2r_list,
         "cross_encoder": ce_final,
     }
-

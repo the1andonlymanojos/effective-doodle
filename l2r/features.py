@@ -2,32 +2,16 @@ import math
 import os
 import pickle
 import random
-import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from elasticsearch import Elasticsearch
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBRanker
-
-
-def load_dotenv_like(path: str) -> Dict[str, str]:
-    env = dict(os.environ)
-    var_ref = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-    def expand(value: str) -> str:
-        return var_ref.sub(lambda m: env.get(m.group(1), ""), value)
-
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if "=" not in line or line.startswith("#"):
-                continue
-            k, v = line.strip().split("=", 1)
-            env[k.strip()] = expand(v.strip().strip('"'))
-    return env
 
 
 def tokenize(x: str) -> List[str]:
@@ -50,7 +34,9 @@ def _distinct_query_terms(q_tokens: List[str]) -> List[str]:
     return out
 
 
-def prox_min_window_unordered(q_tokens: List[str], d_tokens: List[str], max_doc: int = 400) -> float:
+def prox_min_window_unordered(
+    q_tokens: List[str], d_tokens: List[str], max_doc: int = 400
+) -> float:
     d = d_tokens[:max_doc]
     U = _distinct_query_terms(q_tokens)
     if not U:
@@ -88,7 +74,9 @@ def prox_min_window_unordered(q_tokens: List[str], d_tokens: List[str], max_doc:
     return 1.0 / (1.0 + float(best))
 
 
-def prox_ordered_window_optimal(q_tokens: List[str], d_tokens: List[str], max_doc: int = 400) -> float:
+def prox_ordered_window_optimal(
+    q_tokens: List[str], d_tokens: List[str], max_doc: int = 400
+) -> float:
     d = d_tokens[:max_doc]
     k = len(q_tokens)
     if k == 0:
@@ -117,7 +105,9 @@ def prox_ordered_window_optimal(q_tokens: List[str], d_tokens: List[str], max_do
     return 1.0 / (1.0 + float(best_span))
 
 
-def prox_pair_avg_distance(q_tokens: List[str], d_tokens: List[str], max_doc: int = 400) -> float:
+def prox_pair_avg_distance(
+    q_tokens: List[str], d_tokens: List[str], max_doc: int = 400
+) -> float:
     d = d_tokens[:max_doc]
     U = _distinct_query_terms(q_tokens)
     if len(U) < 2:
@@ -136,7 +126,9 @@ def prox_pair_avg_distance(q_tokens: List[str], d_tokens: List[str], max_doc: in
     return 1.0 / (1.0 + avg)
 
 
-def prox_cluster_density(q_tokens: List[str], d_tokens: List[str], max_doc: int = 400) -> float:
+def prox_cluster_density(
+    q_tokens: List[str], d_tokens: List[str], max_doc: int = 400
+) -> float:
     d = d_tokens[:max_doc]
     U = _distinct_query_terms(q_tokens)
     if not U:
@@ -154,7 +146,9 @@ def prox_cluster_density(q_tokens: List[str], d_tokens: List[str], max_doc: int 
     return float(cnt) / float(span)
 
 
-def proximity_greedy_sequential(q_tokens: List[str], d_tokens: List[str], max_doc: int = 400) -> float:
+def proximity_greedy_sequential(
+    q_tokens: List[str], d_tokens: List[str], max_doc: int = 400
+) -> float:
     if not q_tokens:
         return 0.0
     d = d_tokens[:max_doc]
@@ -322,7 +316,9 @@ def compute_embedding_features(
 
     np.random.seed(seed)
     if st_model is None:
-        st_model = SentenceTransformer(model_name, device=os.environ.get("EMBEDDING_DEVICE", "cuda"))
+        st_model = SentenceTransformer(
+            model_name, device=os.environ.get("EMBEDDING_DEVICE", "cuda")
+        )
 
     uqids = df["qid"].unique().tolist()
     q_texts = [qid_to_query_text[q] for q in uqids]
@@ -393,7 +389,7 @@ class L2RConfig:
     es_passage_emb_index: Optional[str] = None
     es_passage_emb_field: str = "embedding"
     use_prox_features: bool = True
-    xgb_params: Dict[str, Any] = None  # set in __post_init__ style below
+    xgb_params: Dict[str, Any] = None
 
     def with_defaults(self) -> "L2RConfig":
         if self.xgb_params is not None:
@@ -419,7 +415,9 @@ class L2RConfig:
         )
 
 
-def build_feature_columns(use_prox_features: bool, emb_names: Sequence[str]) -> Tuple[List[str], List[str], List[str]]:
+def build_feature_columns(
+    use_prox_features: bool, emb_names: Sequence[str]
+) -> Tuple[List[str], List[str], List[str]]:
     lex_cols = LEX_COLS_BASE + (PROX_COLS if use_prox_features else [])
     feat_cols = ["bm25"] + PER_QUERY_COLS + lex_cols + list(emb_names)
     scale_cols = [c for c in feat_cols if c != "bm25"]
@@ -498,7 +496,9 @@ def train_ranker_from_bm25_pools(
     rel_pairs_train = set(zip(qrels_train["qid"], qrels_train["pid"]))
 
     train_qrel_qids = set(qrels_train[qrels_train["rel"] > 0]["qid"].unique())
-    queries_train = queries_train_all[queries_train_all["qid"].isin(train_qrel_qids)].copy()
+    queries_train = queries_train_all[
+        queries_train_all["qid"].isin(train_qrel_qids)
+    ].copy()
 
     rng = random.Random(cfg.seed)
     qrows = list(queries_train[["qid", "query"]].itertuples(index=False, name=None))
@@ -509,24 +509,42 @@ def train_ranker_from_bm25_pools(
     qid_to_tokens: Dict[str, List[str]] = {}
     qid_to_query_text: Dict[str, str] = {}
     for qid, qtext in qrows:
-        hits = bm25_search(es, cfg.es_index, str(qtext), candidate_k, passage_field=cfg.es_passage_field)
+        hits = bm25_search(
+            es,
+            cfg.es_index,
+            str(qtext),
+            candidate_k,
+            passage_field=cfg.es_passage_field,
+        )
         if not hits:
             continue
         qid_to_tokens[str(qid)] = tokenize(str(qtext))
         qid_to_query_text[str(qid)] = str(qtext)
         for pid, passage, score in hits:
-            rows.append({"qid": str(qid), "pid": str(pid), cfg.es_passage_field: passage, "bm25": float(score)})
+            rows.append(
+                {
+                    "qid": str(qid),
+                    "pid": str(pid),
+                    cfg.es_passage_field: passage,
+                    "bm25": float(score),
+                }
+            )
 
     if not rows:
-        raise RuntimeError("No BM25 hits for any sampled training queries; cannot train ranker.")
+        raise RuntimeError(
+            "No BM25 hits for any sampled training queries; cannot train ranker."
+        )
 
     df = pd.DataFrame(rows)
     df["label"] = [
-        1 if (qid, pid) in rel_pairs_train else 0 for qid, pid in zip(df["qid"], df["pid"])
+        1 if (qid, pid) in rel_pairs_train else 0
+        for qid, pid in zip(df["qid"], df["pid"])
     ]
     df = df[df.groupby("qid")["label"].transform("sum") > 0].copy()
     if df.empty:
-        raise RuntimeError("Training pool has no positives after filtering; try larger candidate_k or limit.")
+        raise RuntimeError(
+            "Training pool has no positives after filtering; try larger candidate_k or limit."
+        )
 
     df, emb_names, st_model = featurize_candidates(
         df,
@@ -571,13 +589,6 @@ def train_ranker_from_bm25_pools_batched(
     st_model: Optional[Any] = None,
     progress_every_batches: int = 1,
 ) -> Tuple[XGBRanker, StandardScaler, List[str], List[str], Any]:
-    """
-    Batchwise trainer to cap peak RAM:
-    - fetch BM25 pools per query in batches
-    - featurize each batch, store unscaled feature matrices
-    - fit scaler at end (via partial_fit per batch)
-    - transform per batch and then fit XGBRanker
-    """
     cfg = cfg.with_defaults()
     if query_batch_size < 1:
         raise ValueError("query_batch_size must be >= 1")
@@ -592,7 +603,9 @@ def train_ranker_from_bm25_pools_batched(
 
     rel_pairs_train = set(zip(qrels_train["qid"], qrels_train["pid"]))
     train_qrel_qids = set(qrels_train[qrels_train["rel"] > 0]["qid"].unique())
-    queries_train = queries_train_all[queries_train_all["qid"].isin(train_qrel_qids)].copy()
+    queries_train = queries_train_all[
+        queries_train_all["qid"].isin(train_qrel_qids)
+    ].copy()
 
     rng = random.Random(cfg.seed)
     qrows = list(queries_train[["qid", "query"]].itertuples(index=False, name=None))
@@ -622,7 +635,11 @@ def train_ranker_from_bm25_pools_batched(
 
         for qid, qtext in batch:
             hits = bm25_search(
-                es, cfg.es_index, str(qtext), candidate_k, passage_field=cfg.es_passage_field
+                es,
+                cfg.es_index,
+                str(qtext),
+                candidate_k,
+                passage_field=cfg.es_passage_field,
             )
             if not hits:
                 continue
@@ -642,7 +659,7 @@ def train_ranker_from_bm25_pools_batched(
 
         if not rows:
             if progress_every_batches and ((bi + 1) % progress_every_batches == 0):
-                print(f"[train] batch {bi+1}/{n_batches}: no BM25 rows")
+                print(f"[train] batch {bi + 1}/{n_batches}: no BM25 rows")
             continue
 
         df = pd.DataFrame(rows)
@@ -653,7 +670,9 @@ def train_ranker_from_bm25_pools_batched(
         df = df[df.groupby("qid")["label"].transform("sum") > 0].copy()
         if df.empty:
             if progress_every_batches and ((bi + 1) % progress_every_batches == 0):
-                print(f"[train] batch {bi+1}/{n_batches}: 0 rows after positive filter")
+                print(
+                    f"[train] batch {bi + 1}/{n_batches}: 0 rows after positive filter"
+                )
             continue
 
         df, emb_names, st_model = featurize_candidates(
@@ -668,7 +687,9 @@ def train_ranker_from_bm25_pools_batched(
         )
 
         if not feat_cols:
-            _, feat_cols, scale_cols = build_feature_columns(cfg.use_prox_features, emb_names)
+            _, feat_cols, scale_cols = build_feature_columns(
+                cfg.use_prox_features, emb_names
+            )
 
         df = df.sort_values(["qid", "bm25"], ascending=[True, False]).copy()
         group = df.groupby("qid").size().to_list()
@@ -676,7 +697,6 @@ def train_ranker_from_bm25_pools_batched(
         X_raw = df[feat_cols].to_numpy(dtype=np.float64, copy=True)
         y = df["label"].to_numpy(dtype=np.float32, copy=True)
 
-        # Fit scaler incrementally (on scale cols only).
         scale_idx = [feat_cols.index(c) for c in scale_cols]
         scaler.partial_fit(X_raw[:, scale_idx])
 
@@ -689,14 +709,15 @@ def train_ranker_from_bm25_pools_batched(
 
         if progress_every_batches and ((bi + 1) % progress_every_batches == 0):
             print(
-                f"[train] batch {bi+1}/{n_batches}: +{X_raw.shape[0]} rows "
+                f"[train] batch {bi + 1}/{n_batches}: +{X_raw.shape[0]} rows "
                 f"(cum_rows={total_rows}, cum_qids={total_qids_kept})"
             )
 
     if not X_parts_raw:
-        raise RuntimeError("No training rows after BM25 + positive filter; cannot train ranker.")
+        raise RuntimeError(
+            "No training rows after BM25 + positive filter; cannot train ranker."
+        )
 
-    # Transform all batches and stack for XGBoost.
     X_parts_scaled: List[np.ndarray] = []
     group_train: List[int] = []
     scale_idx = [feat_cols.index(c) for c in scale_cols]
@@ -715,7 +736,7 @@ def train_ranker_from_bm25_pools_batched(
         n_jobs=int(os.environ.get("XGB_N_JOBS", "4")),
         **cfg.xgb_params,
     )
-    print(f"[train] fitting XGBRanker on rows={X.shape[0]} qids={len(group_train)} …")
+    print(f"[train] fitting XGBRanker on rows={X.shape[0]} qids={len(group_train)} ...")
     model.fit(X, y_all, group=group_train)
 
     return model, scaler, list(feat_cols), list(scale_cols), st_model
@@ -736,7 +757,9 @@ def save_ranker_artifacts(
         pickle.dump({"feat_cols": list(feat_cols), "scale_cols": list(scale_cols)}, f)
 
 
-def load_ranker_artifacts(out_dir: str) -> Tuple[XGBRanker, StandardScaler, List[str], List[str]]:
+def load_ranker_artifacts(
+    out_dir: str,
+) -> Tuple[XGBRanker, StandardScaler, List[str], List[str]]:
     model_path = os.path.join(out_dir, "xgb_ranker.json")
     scaler_path = os.path.join(out_dir, "scaler.pkl")
     feat_path = os.path.join(out_dir, "features.pkl")
@@ -747,4 +770,3 @@ def load_ranker_artifacts(out_dir: str) -> Tuple[XGBRanker, StandardScaler, List
     with open(feat_path, "rb") as f:
         meta = pickle.load(f)
     return model, scaler, list(meta["feat_cols"]), list(meta["scale_cols"])
-

@@ -3,8 +3,7 @@
 Elasticsearch BM25 baseline for MS MARCO-style passage ranking.
 
 Mirrors the Anserini guide flow (batch retrieval + MRR@10), using the same
-Elasticsearch setup as demo_es_embed.py: ``match`` on the ``passage`` field,
-``pid`` from ``_source`` (fallback ``_id``).
+Elasticsearch setup: ``match`` on the ``passage`` field,``pid`` from ``_source`` (fallback ``_id``).
 
 Anserini dev baseline uses queries filtered to qids that appear in qrels
 (queries.dev.small.tsv). Set FILTER_QUERIES_TO_QRELS_ONLY = True to do the same
@@ -14,11 +13,11 @@ Note: Lucene/Anserini tuned BM25 (k1=0.82, b=0.68) must be configured on the
 Elasticsearch index mapping; this script does not change index settings. Default
 ES BM25 will differ slightly from the Anserini leaderboard number (~0.187 MRR@10).
 """
+
 from __future__ import annotations
 
 import argparse
 import os
-import re
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +25,7 @@ from typing import Dict, List, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from elasticsearch import Elasticsearch
 
 try:
@@ -36,34 +36,12 @@ except ImportError:
         return x
 
 
-# --- Defaults (override via CLI) ---
-DOTENV_PATH = ".env.local"
 ES_INDEX = "msmarco"
 ES_PASSAGE_FIELD = "passage"
-QUERIES_PATH = "queries.dev.tsv"
-QRELS_PATH = "qrels.dev.tsv"
-FILTER_QUERIES_TO_QRELS_ONLY = True
 RETRIEVE_K = 1000
 MRR_CUTOFF = 10
 MIN_REL = 1
 ES_SEARCH_WORKERS = 24
-OUT_RUN_PATH: str | None = None  # e.g. "runs/es_bm25_dev.run.tsv"; None = do not write
-
-
-def load_dotenv_like(path: str) -> Dict[str, str]:
-    env = dict(os.environ)
-    var_ref = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-    def expand(value: str) -> str:
-        return var_ref.sub(lambda m: env.get(m.group(1), ""), value)
-
-    with open(path, "r") as f:
-        for line in f:
-            if "=" not in line or line.startswith("#"):
-                continue
-            k, v = line.strip().split("=", 1)
-            env[k.strip()] = expand(v.strip().strip('"'))
-    return env
 
 
 def bm25_search(
@@ -87,7 +65,6 @@ def bm25_search(
 
 
 def mrr_at_cutoff(ranked_pids: List[str], relevant: Set[str], cutoff: int) -> float:
-    """MS MARCO MRR@k: reciprocal rank of the first qrel-relevant doc in positions 1..cutoff."""
     for i, pid in enumerate(ranked_pids[:cutoff]):
         if pid in relevant:
             return 1.0 / (i + 1)
@@ -115,11 +92,22 @@ def load_qrels(path: str, min_rel: int) -> Dict[str, Set[str]]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="ES BM25 MS MARCO-style baseline (MRR@10).")
-    p.add_argument("--dotenv", default=DOTENV_PATH, help="Path to .env.local-style file")
+    p.add_argument(
+        "--dotenv", default=".env.local", help="Path to .env.local-style file"
+    )
     p.add_argument("--index", default=ES_INDEX, help="Elasticsearch index name")
     p.add_argument("--passage-field", default=ES_PASSAGE_FIELD, dest="passage_field")
-    p.add_argument("--queries", default=QUERIES_PATH, help="TSV: qid, query")
-    p.add_argument("--qrels", default=QRELS_PATH, help="MS MARCO qrels TSV")
+    p.add_argument(
+        "--data-dir",
+        default="data",
+        help="Directory containing queries.*.tsv and qrels.*.tsv",
+    )
+    p.add_argument(
+        "--queries", default="queries.dev.tsv", help="TSV filename: qid, query"
+    )
+    p.add_argument(
+        "--qrels", default="qrels.dev.tsv", help="MS MARCO qrels TSV filename"
+    )
     p.add_argument(
         "--no-filter-qrels",
         action="store_true",
@@ -131,22 +119,32 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=ES_SEARCH_WORKERS)
     p.add_argument(
         "--out-run",
-        default=OUT_RUN_PATH,
+        default=None,
         help="Write msmarco run (qid \\t pid \\t rank). Default: no file",
     )
     args = p.parse_args()
 
     if args.mrr_cutoff > args.retrieve_k:
-        raise SystemExit(f"--mrr-cutoff ({args.mrr_cutoff}) cannot exceed --retrieve-k ({args.retrieve_k})")
+        raise SystemExit(
+            f"--mrr-cutoff ({args.mrr_cutoff}) cannot exceed --retrieve-k ({args.retrieve_k})"
+        )
 
-    env = load_dotenv_like(args.dotenv)
-    es = Elasticsearch(env["ES_LOCAL_URL"], api_key=env["ES_LOCAL_API_KEY"])
+    load_dotenv(args.dotenv)
+    es_url = os.environ.get("ES_LOCAL_URL")
+    es_api_key = os.environ.get("ES_LOCAL_API_KEY")
+    if not es_url or not es_api_key:
+        raise SystemExit("Missing ES_LOCAL_URL / ES_LOCAL_API_KEY in environment.")
+
+    es = Elasticsearch(es_url, api_key=es_api_key)
     if not es.ping():
         raise SystemExit("Elasticsearch ping failed; check .env.local and cluster.")
 
-    qid_to_rel = load_qrels(args.qrels, args.min_rel)
+    queries_path = os.path.join(args.data_dir, args.queries)
+    qrels_path = os.path.join(args.data_dir, args.qrels)
+
+    qid_to_rel = load_qrels(qrels_path, args.min_rel)
     queries_df = pd.read_csv(
-        args.queries,
+        queries_path,
         sep="\t",
         names=["qid", "query"],
         dtype=str,
@@ -188,7 +186,6 @@ def main() -> None:
             for fut in tqdm(as_completed(futs), total=len(futs), desc="BM25 search"):
                 results.append(fut.result())
 
-    # Deterministic run file order by original query list (parallel completion order is random)
     qid_order = {str(r[0]): i for i, r in enumerate(qrows)}
     results.sort(key=lambda t: qid_order[str(t[0])])
 
@@ -218,7 +215,9 @@ def main() -> None:
     print(f"QueriesRanked: {n_q}")
     print(f"Queries with >=1 qrel (evaluated for MRR): {n_with_qrels}")
     if recall_scores:
-        print(f"Recall @ min(1000, retrieve_k) (any relevant in top-k): {recall_mean:.6f}")
+        print(
+            f"Recall @ min(1000, retrieve_k) (any relevant in top-k): {recall_mean:.6f}"
+        )
     print(f"Elapsed: {elapsed:.1f}s ({n_q / max(elapsed, 1e-9):.2f} q/s)")
     print("#####################")
 
