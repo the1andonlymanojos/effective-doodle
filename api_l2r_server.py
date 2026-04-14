@@ -5,9 +5,12 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import numpy as np
 from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from l2r_features import (
     L2RConfig,
@@ -22,6 +25,53 @@ from l2r_features import (
 def _snippet(text: str, n: int = 220) -> str:
     s = re.sub(r"\s+", " ", str(text)).strip()
     return s[:n] + ("…" if len(s) > n else "")
+
+
+def compute_mmr(doc_scores: List[float], passages: List[str], lambda_param: float = 0.5, top_k: int = 10) -> List[Tuple[int, float]]:
+    if not passages:
+        return []
+        
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(passages)
+        sim_matrix = cosine_similarity(tfidf_matrix)
+    except Exception:
+        # Fallback if vocabulary is empty or other errors occur
+        return [(i, float(doc_scores[i])) for i in range(min(top_k, len(passages)))]
+
+    scores = np.array(doc_scores)
+    if len(scores) > 1 and scores.max() != scores.min():
+        scores = (scores - scores.min()) / (scores.max() - scores.min())
+    else:
+        scores = np.ones_like(scores)
+
+    unselected = list(range(len(passages)))
+    selected_with_scores = []
+    selected = []
+
+    first_idx = int(np.argmax(scores))
+    selected.append(first_idx)
+    selected_with_scores.append((first_idx, float(scores[first_idx])))
+    unselected.remove(first_idx)
+
+    while len(selected) < top_k and unselected:
+        best_score = -float('inf')
+        best_idx = -1
+
+        for idx in unselected:
+            rel_score = scores[idx]
+            max_sim = max(sim_matrix[idx, s_idx] for s_idx in selected)
+            mmr_score = lambda_param * rel_score - (1.0 - lambda_param) * max_sim
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_idx = idx
+
+        selected.append(best_idx)
+        selected_with_scores.append((best_idx, float(best_score)))
+        unselected.remove(best_idx)
+
+    return selected_with_scores
 
 
 class AppState:
@@ -190,6 +240,8 @@ def sample(
     seed: Optional[int] = None,
     ce_rerank_k: int = Query(100, ge=1, le=1000),
     ce_return_k: int = Query(100, ge=1, le=1000),
+    mmr_lambda: float = Query(0.5, ge=0.0, le=1.0),
+    mmr_return_k: int = Query(10, ge=1, le=1000),
 ) -> Dict[str, Any]:
     if STATE.es is None or STATE.cfg is None:
         raise HTTPException(status_code=503, detail="Not initialized")
@@ -283,6 +335,33 @@ def sample(
     else:
         ce_final = []
 
+    mmr_final: List[Dict[str, Any]] = []
+    if STATE.ce_model is not None and "final" in locals() and not final.empty:
+        base_df = final
+        score_col = "ce_score"
+    elif not df_l2r.empty:
+        rk = min(int(ce_rerank_k), len(df_l2r))
+        base_df = df_l2r.head(rk)
+        score_col = "l2r_score"
+    else:
+        base_df = pd.DataFrame()
+        score_col = ""
+
+    if not base_df.empty:
+        doc_scores = base_df[score_col].tolist()
+        passages = base_df[STATE.cfg.es_passage_field].tolist()
+        pids = base_df["pid"].tolist()
+        
+        mmr_results = compute_mmr(doc_scores, passages, lambda_param=mmr_lambda, top_k=min(mmr_return_k, len(passages)))
+        for rank_i, (idx, mmr_score) in enumerate(mmr_results):
+            mmr_final.append({
+                "rank": rank_i + 1,
+                "pid": str(pids[idx]),
+                "score": float(doc_scores[idx]),
+                "mmr_score": float(mmr_score),
+                "snippet": _snippet(passages[idx]),
+            })
+
     rels_map = STATE.qid_to_rels.get(qid, {})
     relevant_pids = sorted(rels_map.keys())
 
@@ -299,6 +378,8 @@ def sample(
             "cross_encoder_rerank": STATE.ce_model is not None,
             "ce_rerank_k": int(ce_rerank_k),
             "ce_return_k": int(ce_return_k),
+            "mmr_lambda": float(mmr_lambda),
+            "mmr_return_k": int(mmr_return_k),
             "feature_cols": list(STATE.feat_cols),
             "emb_names": list(emb_names),
         },
@@ -308,5 +389,6 @@ def sample(
         "bm25": bm25_list,
         "l2r": l2r_list,
         "cross_encoder": ce_final,
+        "mmr": mmr_final,
     }
 
