@@ -15,7 +15,6 @@ Elasticsearch index mapping; this script does not change index settings. Default
 ES BM25 will differ slightly from the Anserini leaderboard number (~0.187 MRR@10).
 """
 from __future__ import annotations
-
 import argparse
 import os
 import re
@@ -23,10 +22,11 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Set, Tuple
-
+import collections
 import numpy as np
 import pandas as pd
 from elasticsearch import Elasticsearch
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 try:
     from tqdm import tqdm
@@ -72,18 +72,96 @@ def bm25_search(
     field: str,
     query: str,
     k: int,
-) -> List[Tuple[str, float]]:
+    is_query_string: bool = False
+) -> List[Tuple[str, float, str]]:
+    q_body = {}
+    if is_query_string:
+        q_body = {"query_string": {"query": query, "default_field": field}}
+    else:
+        q_body = {"match": {field: query}}
+
     resp = client.search(
         index=index,
-        query={"match": {field: query}},
+        query=q_body,
         size=k,
     )
-    out: List[Tuple[str, float]] = []
+    out: List[Tuple[str, float, str]] = []
     for h in resp["hits"]["hits"]:
         src = h.get("_source") or {}
         pid = str(src.get("pid", h["_id"]))
-        out.append((pid, float(h["_score"])))
+        out.append((pid, float(h["_score"]), str(src.get(field, ""))))
     return out
+
+
+def build_rm3_query(
+    original_query: str,
+    hits: List[Tuple[str, float, str]],
+    fb_docs: int,
+    fb_terms: int,
+    original_weight: float,
+) -> str:
+    top_hits = hits[:fb_docs]
+    if not top_hits:
+        return original_query
+
+    scores = np.array([score for _, score, _ in top_hits])
+    scores = scores - np.max(scores)
+    exp_scores = np.exp(scores)
+    p_D = exp_scores / np.sum(exp_scores)
+
+    term_probs = collections.defaultdict(float)
+    for i, (_, _, passage) in enumerate(top_hits):
+        tokens = str(passage).lower().split()
+        clean_tokens = []
+        for t in tokens:
+            t = "".join(c for c in t if c.isalnum())
+            if t and t not in ENGLISH_STOP_WORDS:
+                clean_tokens.append(t)
+
+        if not clean_tokens:
+            continue
+
+        doc_len = len(clean_tokens)
+        counts = collections.Counter(clean_tokens)
+        for w, count in counts.items():
+            prob_w_given_D = count / doc_len
+            term_probs[w] += prob_w_given_D * p_D[i]
+
+    sorted_terms = sorted(term_probs.items(), key=lambda x: x[1], reverse=True)
+    top_terms = sorted_terms[:fb_terms]
+
+    q_tokens = original_query.lower().split()
+    # Ensure query tokens are clean too, to match terms
+    q_tokens_clean = []
+    for t in q_tokens:
+        t = "".join(c for c in t if c.isalnum())
+        if t: q_tokens_clean.append(t)
+    
+    q_counts = collections.Counter(q_tokens_clean)
+    q_len = len(q_tokens_clean)
+
+    final_terms_weight = {}
+    for t, p_rm1 in top_terms:
+        final_terms_weight[t] = (1 - original_weight) * p_rm1
+
+    for t, count in q_counts.items():
+        p_q = count / max(q_len, 1)
+        if t in final_terms_weight:
+            final_terms_weight[t] += original_weight * p_q
+        else:
+            final_terms_weight[t] = original_weight * p_q
+
+    max_weight = max(final_terms_weight.values()) if final_terms_weight else 1.0
+    query_parts = []
+    for t, w in final_terms_weight.items():
+        w_norm = w / max_weight
+        if w_norm > 0.01:
+            query_parts.append(f"{t}^{w_norm:.4f}")
+
+    if not query_parts:
+        return original_query
+
+    return " ".join(query_parts)
 
 
 def mrr_at_cutoff(ranked_pids: List[str], relevant: Set[str], cutoff: int) -> float:
@@ -129,6 +207,10 @@ def main() -> None:
     p.add_argument("--mrr-cutoff", type=int, default=MRR_CUTOFF)
     p.add_argument("--min-rel", type=int, default=MIN_REL)
     p.add_argument("--workers", type=int, default=ES_SEARCH_WORKERS)
+    p.add_argument("--rm3", action="store_true", help="Enable TopRM3 pseudo relevance feedback")
+    p.add_argument("--rm3-fb-terms", type=int, default=10, help="Number of terms for RM3 expansion")
+    p.add_argument("--rm3-fb-docs", type=int, default=10, help="Number of documents for RM3 feedback")
+    p.add_argument("--rm3-original-weight", type=float, default=0.5, help="Original query weight for RM3 interpolation")
     p.add_argument(
         "--out-run",
         default=OUT_RUN_PATH,
@@ -176,7 +258,18 @@ def main() -> None:
     def work(row: Tuple[str, str]) -> Tuple[str, List[str], Set[str]]:
         qid, qtext = row
         hits = bm25_search(es, args.index, args.passage_field, qtext, args.retrieve_k)
-        pids = [pid for pid, _ in hits]
+        
+        if args.rm3:
+            expanded_query = build_rm3_query(
+                original_query=qtext,
+                hits=hits,
+                fb_docs=args.rm3_fb_docs,
+                fb_terms=args.rm3_fb_terms,
+                original_weight=args.rm3_original_weight
+            )
+            hits = bm25_search(es, args.index, args.passage_field, expanded_query, args.retrieve_k, is_query_string=True)
+
+        pids = [pid for pid, _, _ in hits]
         return qid, pids, qid_to_rel.get(qid, set())
 
     if args.workers <= 1:
